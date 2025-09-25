@@ -183,16 +183,6 @@ Router DNS: 192.168.1.100,8.8.8.8,1.1.1.1
 - Comprobar comentarios de networks: `/ip dhcp-server network print`
 - Asegurar coincidencia exacta entre nombres y comentarios
 
-## 🗂️ Estructura de Archivos
-
-```
-DNS Monitor for Mikrotik/
-├── DNS-monitor.rsc        # Script principal
-├── readme.md              # Este archivo
-├── changelog.md           # Histórico de cambios
-└── examples/
-    ├── dhcp-config.rsc    # Ejemplo configuración DHCP
-    └── telegram-test.rsc  # Test notificaciones
 ```
 
 ## 📝 Desinstalación
