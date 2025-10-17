@@ -8,7 +8,7 @@
 # Fecha: 24/09/2025
 # Versión: 1.0 STABLE
 # Compatibilidad: RouterOS 7.x+
-# 
+# sss
 # FUNCIONALIDADES PRINCIPALES:
 # - Monitoreo continuo de Pi-hole cada minuto (configurable)
 # - Failover automático a DNS backup en caso de fallo
