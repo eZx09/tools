@@ -4,7 +4,7 @@
 # - Mueve entre pub↔priv si cambia visibilidad
 # - Detecta renombres (por ID) y mueve carpeta (.repo_id)
 # - Prune de repos eliminados
-# - Telegram con emojis, timestamp y extracto de log si hay incidencias
+# - Telegram con emojis, timestamp y extracto SOLO del último run
 # - Snapshots .tar.gz opcionales
 
 set -eu
@@ -15,10 +15,10 @@ set -eu
 : "${TELEGRAM_CHAT_ID:?Falta TELEGRAM_CHAT_ID}"  # chat_id destino
 
 USE_SSH="${USE_SSH:-1}"                 # 1=SSH (recomendado), 0=HTTPS con token
-GITHUB_TOKEN="${GITHUB_TOKEN:-}"        # para listar privados y clonar por HTTPS si hiciera falta
-PRUNE_LOCAL="${PRUNE_LOCAL:-1}"         # 1=eliminar repos locales que ya no existen en GitHub
+GITHUB_TOKEN="${GITHUB_TOKEN:-}"        # listar privados / HTTPS fallback
+PRUNE_LOCAL="${PRUNE_LOCAL:-1}"         # 1=eliminar repos locales inexistentes en GitHub
 
-# Rutas (customizables por .env) - valores genéricos para Synology
+# Rutas (genéricas para Synology; ajustables en .env)
 BASE="${BASE:-/volume1/git-mirrors}"                       # raíz de los repos locales
 LOG_DIR="${LOG_DIR:-/volume1/scripts/logs/sync_github}"    # carpeta de logs
 
@@ -26,7 +26,7 @@ LOG_DIR="${LOG_DIR:-/volume1/scripts/logs/sync_github}"    # carpeta de logs
 SNAPSHOT_ENABLE="${SNAPSHOT_ENABLE:-0}"                    # 1=activar snapshots
 SNAPSHOT_DIR="${SNAPSHOT_DIR:-/volume1/backups/github}"    # carpeta para .tar.gz
 SNAPSHOT_RETENTION_DAYS="${SNAPSHOT_RETENTION_DAYS:-7}"
-TAIL_N="${TAIL_N:-10}"                                     # líneas de log en incidencias
+TAIL_N="${TAIL_N:-10}"                                     # líneas del log a adjuntar si hay incidencias
 # ================================================================
 
 # Normaliza por si .env tuvo CRLF
@@ -62,7 +62,13 @@ fi
 # Emoji por visibilidad
 icon_for_priv() { [ "$1" = "true" ] && printf "🔒" || printf "🌐"; }
 
+# ====== CONTROL DE EJECUCIÓN (solo esta ejecución) ======
+RUN_ID="$(date +%s)"   # identificador único de run
+ERRORS=0               # contador de errores de este run
+err() { log "❌ $*"; ERRORS=$((ERRORS+1)); }
+
 log "==== Iniciando sync-github en $BASE (usuario: $GITHUB_USER) ===="
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] >>> RUN $RUN_ID START" | tee -a "$LOG_FILE" >/dev/null
 
 # ---- Descarga lista de repos (paginado). TOKEN => incluye privados ----
 PAGE=1
@@ -103,11 +109,7 @@ while IFS="$(printf '\t')" read -r REPO_ID NAME PRIVATE SSHURL HTTPSURL BRANCH; 
   BRANCH=$(printf '%s' "$BRANCH" | tr -d '\r')
 
   # Destino por visibilidad
-  if [ "$PRIVATE" = "true" ]; then
-    VISDIR="$PRIV"; OTHER="$PUB"
-  else
-    VISDIR="$PUB";  OTHER="$PRIV"
-  fi
+  if [ "$PRIVATE" = "true" ]; then VISDIR="$PRIV"; OTHER="$PUB"; else VISDIR="$PUB"; OTHER="$PRIV"; fi
   DEST="${VISDIR}/${NAME}"
 
   # Renombrado por ID (mueve carpeta al nuevo nombre y/o pub↔priv)
@@ -133,7 +135,7 @@ while IFS="$(printf '\t')" read -r REPO_ID NAME PRIVATE SSHURL HTTPSURL BRANCH; 
     if git -C "$DEST" show-ref --verify --quiet "refs/heads/${BRANCH}"; then
       git -C "$DEST" checkout "${BRANCH}" >>"$LOG_FILE" 2>&1 || true
     fi
-    if git -C "$DEST" pull --ff-only >>"$LOG_FILE" 2>&1; then :; else log "❌ Fallo haciendo pull en $NAME"; fi
+    if git -C "$DEST" pull --ff-only >>"$LOG_FILE" 2>&1; then :; else err "Fallo haciendo pull en $NAME"; fi
     ACTUALIZADOS=$((ACTUALIZADOS+1))
     ICON="$(icon_for_priv "$PRIVATE")"
     ACTUALIZADOS_LIST="${ACTUALIZADOS_LIST}\n  - ${ICON} ${NAME}"
@@ -142,18 +144,18 @@ while IFS="$(printf '\t')" read -r REPO_ID NAME PRIVATE SSHURL HTTPSURL BRANCH; 
     if [ "$USE_SSH" = "1" ] && [ -n "$SSHURL" ]; then CLONE_URL="$SSHURL"; else CLONE_URL="$HTTPSURL"; fi
     mkdir -p "$VISDIR"
     if echo "$CLONE_URL" | grep -q '^git@github.com:'; then
-      if git clone "$CLONE_URL" "$DEST" >>"$LOG_FILE" 2>&1; then :; else log "❌ Fallo clonando (SSH) $NAME"; fi
+      if git clone "$CLONE_URL" "$DEST" >>"$LOG_FILE" 2>&1; then :; else err "Fallo clonando (SSH) $NAME"; fi
     else
-      if [ "$PRIVATE" = "true" ] && [ -z "$GITHUB_TOKEN" ]; then log "❌ Repo privado sin GITHUB_TOKEN (HTTPS): $NAME"; fi
+      if [ "$PRIVATE" = "true" ] && [ -z "$GITHUB_TOKEN" ]; then err "Repo privado sin GITHUB_TOKEN (HTTPS): $NAME"; fi
       if [ -n "$GITHUB_TOKEN" ]; then
         STRIPPED=$(echo "$CLONE_URL" | sed 's#https://##')
         if git clone "https://${GITHUB_TOKEN}@${STRIPPED}" "$DEST" >>"$LOG_FILE" 2>&1; then
           git -C "$DEST" remote set-url origin "$HTTPSURL" >>"$LOG_FILE" 2>&1 || true
         else
-          log "❌ Fallo clonando (HTTPS+token) $NAME"
+          err "Fallo clonando (HTTPS+token) $NAME"
         fi
       else
-        if git clone "$CLONE_URL" "$DEST" >>"$LOG_FILE" 2>&1; then :; else log "❌ Fallo clonando (HTTPS) $NAME"; fi
+        if git clone "$CLONE_URL" "$DEST" >>"$LOG_FILE" 2>&1; then :; else err "Fallo clonando (HTTPS) $NAME"; fi
       fi
     fi
     git -C "$DEST" checkout "${BRANCH}" >>"$LOG_FILE" 2>&1 || true
@@ -190,6 +192,15 @@ if [ "$SNAPSHOT_ENABLE" = "1" ]; then
   find "$SNAPSHOT_DIR" -type f -name "github-*.tar.gz" -mtime +"$SNAPSHOT_RETENTION_DAYS" -delete 2>/dev/null || true
 fi
 
+# ====== CERRAR RUN Y EXTRAER SOLO ESTE BLOQUE ======
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] >>> RUN $RUN_ID END" | tee -a "$LOG_FILE" >/dev/null
+
+RUN_BLOCK="$(awk -v id="$RUN_ID" '
+  $0 ~ ">>> RUN " id " START" {p=1; next}
+  $0 ~ ">>> RUN " id " END"   {p=0}
+  p
+' "$LOG_FILE")"
+
 # ---- Limpia listas para evitar líneas en blanco extra ----
 CLONADOS_LIST=$(printf "%b" "$CLONADOS_LIST" | sed '/^$/d')
 ACTUALIZADOS_LIST=$(printf "%b" "$ACTUALIZADOS_LIST" | sed '/^$/d')
@@ -197,7 +208,7 @@ MOVIDOS_LIST=$(printf "%b" "$MOVIDOS_LIST" | sed '/^$/d')
 PRUNED_LIST=$(printf "%b" "$PRUNED_LIST" | sed '/^$/d')
 RENOMBRADOS_LIST=$(printf "%b" "$RENOMBRADOS_LIST" | sed '/^$/d')
 
-# ---- Telegram resumen (Markdown + emojis + hora + estado + log tail si hay incidencias) ----
+# ---- Telegram resumen (Markdown + emojis + hora + estado + RUN BLOCK) ----
 fmt_section() {
   # $1=emoji $2=título $3=conteo $4=lista (ya con saltos reales)
   if [ "$3" -gt 0 ]; then
@@ -207,13 +218,14 @@ fmt_section() {
   fi
 }
 
-if grep -q "❌" "$LOG_FILE"; then
+if [ "$ERRORS" -gt 0 ]; then
   STATUS_EMOJI="⚠️"; STATUS_TEXT="Con incidencias"
-  LOG_TAIL=$(tail -n "$TAIL_N" "$LOG_FILE" | sed 's/^/    /')
 else
   STATUS_EMOJI="✅"; STATUS_TEXT="OK"
-  LOG_TAIL=""
 fi
+
+# Extracto SOLO de este run
+LOG_TAIL="$(printf "%s\n" "$RUN_BLOCK" | tail -n "$TAIL_N" | sed 's/^/    /')"
 
 SUMMARY=$(printf "🕒 *%s*\n\n*%s sync-github %s*\n\n%s\n%s\n%s\n%s\n%s\n• *Carpeta:* \`%s\`\n• *Log:* \`%s\`" \
   "$(date '+%Y-%m-%d %H:%M:%S')" \
@@ -227,7 +239,7 @@ SUMMARY=$(printf "🕒 *%s*\n\n*%s sync-github %s*\n\n%s\n%s\n%s\n%s\n%s\n• *C
 
 if [ -n "$LOG_TAIL" ]; then
   LOG_TAIL_FORMATTED=$(printf "%b" "$LOG_TAIL")
-  MSG=$(printf "%s\n\n*🔎 Extracto del log:*\n%s" "$SUMMARY" "$LOG_TAIL_FORMATTED")
+  MSG=$(printf "%s\n\n*🔎 Extracto del log (últimas %s líneas de este run):*\n%s" "$SUMMARY" "$TAIL_N" "$LOG_TAIL_FORMATTED")
 else
   MSG="${SUMMARY}"
 fi
